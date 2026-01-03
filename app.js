@@ -130,8 +130,18 @@ const els = {
     tabs: document.querySelectorAll('.tab-btn'),
     views: {
         calendar: document.getElementById('view-calendar'),
-        stats: document.getElementById('view-stats')
-    }
+        stats: document.getElementById('view-stats'),
+        lists: document.getElementById('view-lists')
+    },
+
+    // Lists DOM
+    listsGrid: document.getElementById('lists-grid'),
+    modalCollection: document.getElementById('modal-collection'),
+    formCollection: document.getElementById('form-collection'),
+    modalItem: document.getElementById('modal-item'),
+    formItem: document.getElementById('form-item'),
+    btnAddDayItem: document.getElementById('btn-add-day-item'),
+    dayItemsList: document.getElementById('day-items-list')
 };
 
 // *** UTILS ***
@@ -155,7 +165,9 @@ function setupEventListeners() {
         e.preventDefault();
         const email = document.getElementById('email').value;
         const password = document.getElementById('password').value;
-        const type = e.submitter.id === 'btn-signup' ? 'signup' : 'login'; // Determine action
+        // Default to login if submitter is undefined (e.g. Enter key)
+        const submitterId = e.submitter ? e.submitter.id : 'btn-login';
+        const type = submitterId === 'btn-signup' ? 'signup' : 'login';
         await handleAuth(email, password, type);
     });
 
@@ -177,6 +189,9 @@ function setupEventListeners() {
             if (tab.dataset.tab === 'stats') {
                 updateStatsView();
                 setupCrossStats();
+            }
+            if (tab.dataset.tab === 'lists') {
+                loadCollections();
             }
         });
     });
@@ -232,7 +247,17 @@ function setupEventListeners() {
         if (state.currentCalendar) {
             await loadCalendar(state.currentCalendar.id);
         }
+        await loadCollections(); // Reload lists for new year
     });
+
+    // Lists
+    document.getElementById('btn-new-collection').addEventListener('click', () => {
+        els.formCollection.reset();
+        show(els.modalCollection);
+    });
+    els.formCollection.addEventListener('submit', createCollection);
+    els.formItem.addEventListener('submit', createItem);
+    els.btnAddDayItem.addEventListener('click', openAddItemFromDay);
 }
 
 // ... (other code)
@@ -1091,6 +1116,9 @@ function openDayModal(dateString) {
     // WOW: Special Day
     document.getElementById('day-special-type').value = state.specialDays.get(dateString) || '';
 
+    // Lists: Render Day Items
+    renderDayItems(dateString);
+
     // Render Markers Toggles
     els.dayMarkersContainer.innerHTML = state.markers.map(m => {
         const isActive = entry.markers && entry.markers[m.key];
@@ -1633,5 +1661,168 @@ async function fetchEntriesForAnalysis(calId) {
 }
 
 
-// Start
-init();
+// *** LISTS & COLLECTIONS ***
+
+let collections = []; // Cache for collections [ {id, name, items: []} ]
+
+async function loadCollections() {
+    if (!state.user) return;
+
+    // 1. Fetch Collections
+    const { data: cols, error } = await supabaseClient
+        .from('collections')
+        .select('*')
+        .eq('user_id', state.user.id);
+
+    if (error) return console.error("Error loading collections", error);
+
+    // 2. Fetch Items (for this year?) - Let's fetch all for simplicity or filter by year in UI
+    const { data: items, error: errorItems } = await supabaseClient
+        .from('collection_items')
+        .select('*')
+        .gte('completed_date', `${state.year}-01-01`)
+        .lte('completed_date', `${state.year}-12-31`)
+        .order('completed_date', { ascending: false });
+
+    // Map items to collections
+    collections = cols.map(c => ({
+        ...c,
+        items: items ? items.filter(i => i.collection_id === c.id) : []
+    }));
+
+    renderListsView();
+}
+
+function renderListsView() {
+    els.listsGrid.innerHTML = collections.map(c => `
+        <div class="stat-card" style="align-items: flex-start;">
+            <div style="display:flex; justify-content:space-between; width:100%;">
+                <h3 style="display:flex; align-items:center; gap:0.5rem;">
+                    <span style="font-size:1.5rem;">${c.icon || '📝'}</span> 
+                    ${c.name}
+                </h3>
+                <span class="badge" style="background: var(--bg-body);">${c.items.length}</span>
+            </div>
+            
+            <div class="items-preview" style="width:100%; margin-top:1rem; max-height: 200px; overflow-y: auto;">
+                ${c.items.length === 0 ? '<p class="text-muted text-sm">Sin elementos este año.</p>' :
+            c.items.map(i => `
+                    <div style="padding: 0.5rem; border-bottom: 1px solid var(--border); font-size: 0.9rem;">
+                        <strong>${i.title}</strong>
+                        <div style="display:flex; justify-content:space-between; color: var(--text-muted); font-size: 0.8rem;">
+                            <span>${i.completed_date}</span>
+                            <span>${i.rating ? '⭐'.repeat(i.rating) : ''}</span>
+                        </div>
+                    </div>
+                  `).join('')}
+            </div>
+            <button class="btn btn-sm btn-outline full-width" style="margin-top:auto;" onclick="openItemModal('${c.id}')">+ Agregar</button>
+        </div>
+    `).join('');
+}
+
+async function createCollection(e) {
+    e.preventDefault();
+    const name = document.getElementById('col-name').value;
+    const icon = document.getElementById('col-icon').value;
+
+    const { error } = await supabaseClient.from('collections').insert({
+        user_id: state.user.id,
+        name,
+        icon,
+        color: '#3b82f6'
+    });
+
+    if (!error) {
+        closeModal(els.modalCollection);
+        loadCollections();
+    }
+}
+
+async function createItem(e) {
+    e.preventDefault();
+    const collection_id = document.getElementById('item-collection-id').value;
+    const title = document.getElementById('item-title').value;
+    const date = document.getElementById('item-date').value;
+    const rating = document.getElementById('item-rating').value || null;
+
+    const { error } = await supabaseClient.from('collection_items').insert({
+        collection_id,
+        title,
+        completed_date: date,
+        rating: rating ? parseInt(rating) : null
+    });
+
+    if (!error) {
+        closeModal(els.modalItem);
+        // If date matches current viewed day, refresh day modal?
+        // Refetch everything for now
+        await loadCollections();
+        // If we are in the day modal context, refresh that list too
+        if (!els.modalDay.classList.contains('hidden')) {
+            renderDayItems(date); // Not perfect if date changed, but ok
+        }
+    }
+}
+
+// Helpers
+window.openItemModal = (colId) => {
+    document.getElementById('item-collection-id').value = colId;
+    document.getElementById('item-date').value = formatDate(new Date()); // Today default
+    show(els.modalItem);
+};
+
+// Day Modal Integration
+function renderDayItems(dateStr) {
+    const container = els.dayItemsList;
+    if (!collections.length) {
+        container.innerHTML = '<p class="text-muted">Crea una colección primero (Pestaña Listas)</p>';
+        return;
+    }
+
+    // Find items for this date
+    let dayItems = [];
+    collections.forEach(c => {
+        c.items.forEach(i => {
+            if (i.completed_date === dateStr) {
+                dayItems.push({ ...i, colName: c.name, colIcon: c.icon });
+            }
+        });
+    });
+
+    if (dayItems.length === 0) {
+        container.innerHTML = '<p class="text-muted">Nada registrado.</p>';
+    } else {
+        container.innerHTML = dayItems.map(i => `
+            <div style="display:flex; justify-content:space-between; align-items:center; padding: 0.25rem 0; border-bottom: 1px dashed var(--border);">
+                <span>${i.colIcon} ${i.title}</span>
+                <span class="text-sm">${i.rating ? '⭐' + i.rating : ''}</span>
+            </div>
+        `).join('');
+    }
+}
+
+function openAddItemFromDay() {
+    // Show a small popup to choose collection first? Or just default to first?
+    if (collections.length === 0) return alert("Crea una colección primero");
+
+    // For simplicity, just pick first or standard behavior
+    // Better: Helper modal to pick collection? 
+    // Let's reuse modal-item but we need to select collection.
+    // Hack: Add collection select to modal-item if opened from here? 
+    // Plan: Just open a prompt or simple choice if multiple.
+
+    if (collections.length === 1) {
+        openItemModal(collections[0].id);
+        document.getElementById('item-date').value = currentEditingDate;
+    } else {
+        // Simple prompt for now or auto-select first
+        // Ideally show a mini-menu. 
+        // Let's just default to first for MVP.
+        openItemModal(collections[0].id);
+        document.getElementById('item-date').value = currentEditingDate;
+    }
+}
+
+// Start Application
+window.addEventListener('DOMContentLoaded', init);

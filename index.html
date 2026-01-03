@@ -101,6 +101,7 @@
                 <nav class="tabs">
                     <button class="tab-btn active" data-tab="calendar">Calendario</button>
                     <button class="tab-btn" data-tab="stats">Estadísticas</button>
+                    <button class="tab-btn" data-tab="lists">Listas</button>
                 </nav>
                 <button id="btn-select-mode" class="btn btn-sm btn-outline">Seleccionar</button>
                 <button id="btn-compare-mode" class="btn btn-sm btn-outline"
@@ -207,6 +208,18 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Lists View -->
+            <div id="view-lists" class="view hidden">
+                <div class="lists-header"
+                    style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+                    <h2>Mis Colecciones</h2>
+                    <button id="btn-new-collection" class="btn btn-primary btn-sm">+ Nueva Lista</button>
+                </div>
+                <div id="lists-grid" class="lists-grid">
+                    <!-- Collections rendered here -->
+                </div>
+            </div>
     </div>
     </main>
 
@@ -219,6 +232,60 @@
             <button id="btn-bulk-cancel" class="btn btn-sm btn-ghost">Cancelar</button>
         </div>
     </div>
+    </div>
+
+    <!-- Modal: New Collection -->
+    <div id="modal-collection" class="modal hidden">
+        <div class="modal-content">
+            <h3>Nueva Colección</h3>
+            <form id="form-collection">
+                <div class="form-group">
+                    <label>Nombre</label>
+                    <input type="text" id="col-name" placeholder="Ej. Libros Leídos" required>
+                </div>
+                <div class="form-group">
+                    <label>Icono</label>
+                    <input type="text" id="col-icon" placeholder="📚" class="input-emoji" maxlength="2">
+                </div>
+                <button type="submit" class="btn btn-primary full-width">Crear</button>
+            </form>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost close-modal">Cancelar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: New Item -->
+    <div id="modal-item" class="modal hidden">
+        <div class="modal-content">
+            <h3 id="modal-item-title">Agregar Elemento</h3>
+            <form id="form-item">
+                <input type="hidden" id="item-collection-id">
+                <div class="form-group">
+                    <label>Título</label>
+                    <input type="text" id="item-title" required placeholder="Ej. El Principito">
+                </div>
+                <div class="form-group">
+                    <label>Fecha de término</label>
+                    <input type="date" id="item-date" required>
+                </div>
+                <div class="form-group">
+                    <label>Valoración (Opcional)</label>
+                    <select id="item-rating" class="input-sm" style="width:100%; padding:0.5rem;">
+                        <option value="">Sin nota</option>
+                        <option value="5">⭐⭐⭐⭐⭐</option>
+                        <option value="4">⭐⭐⭐⭐</option>
+                        <option value="3">⭐⭐⭐</option>
+                        <option value="2">⭐⭐</option>
+                        <option value="1">⭐</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary full-width">Guardar</button>
+            </form>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost close-modal">Cancelar</button>
+            </div>
+        </div>
     </div>
 
     <!-- Modals -->
@@ -319,6 +386,14 @@
             <div class="form-group">
                 <label>Nota del día</label>
                 <textarea id="day-note" rows="3"></textarea>
+            </div>
+
+            <!-- Lists Integration -->
+            <div id="day-items-section"
+                style="margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem;">
+                <label style="font-weight:600; font-size:0.9rem;">Logros del día</label>
+                <div id="day-items-list" style="margin-bottom: 0.5rem; font-size: 0.9rem;"></div>
+                <button id="btn-add-day-item" class="btn btn-xs btn-outline">+ Agregar Logro</button>
             </div>
 
             <div class="modal-actions">
