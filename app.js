@@ -235,14 +235,49 @@ async function handleAuth(email, password, type) {
 
 // *** DATA LOADING ***
 async function initApp() {
-    // 1. Load Calendars
-    const { data, error } = await supabaseClient.from('calendars').select('*').order('created_at');
-    if (error) return console.error(error);
+    // 1. Load Calendars (Owned + Shared)
+    const userEmail = state.user.email;
 
-    state.calendars = data;
+    // A. Fetch Owned
+    const { data: owned, error: errorOwned } = await supabaseClient
+        .from('calendars')
+        .select('*')
+        .eq('user_id', state.user.id);
+
+    if (errorOwned) return console.error("Error loading owned calendars:", errorOwned);
+
+    // B. Fetch Shared (via email)
+    // First get the IDs from calendar_shares
+    const { data: shares, error: errorShares } = await supabaseClient
+        .from('calendar_shares')
+        .select('calendar_id')
+        .eq('shared_with_email', userEmail);
+
+    let sharedCalendars = [];
+    if (!errorShares && shares && shares.length > 0) {
+        const calendarIds = shares.map(s => s.calendar_id);
+        // Then fetch the actual calendars
+        const { data: shared, error: errorSharedDetails } = await supabaseClient
+            .from('calendars')
+            .select('*')
+            .in('id', calendarIds);
+
+        if (!errorSharedDetails && shared) {
+            sharedCalendars = shared;
+        }
+    }
+
+    // Combine and Sort
+    // We can add a flag or property to indicate it's shared if we want, 
+    // but the UI currently checks (user_id !== state.user.id) which works fine.
+    state.calendars = [...(owned || []), ...sharedCalendars];
+    // Sort by creation date
+    state.calendars.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
     renderCalendarSelect();
 
     if (state.calendars.length > 0) {
+
         await loadCalendar(state.calendars[0].id);
     } else {
         // Prompt to create one or create a default one
@@ -353,7 +388,36 @@ function renderCalendarGrid() {
             }
             cell.appendChild(markersDiv);
 
-            cell.addEventListener('click', (e) => handleDayClick(e, dayDateString));
+            // Mobile Long Press Logic
+            let touchTimer = null;
+            let hasLongPressed = false;
+
+            cell.addEventListener('touchstart', () => {
+                hasLongPressed = false;
+                touchTimer = setTimeout(() => {
+                    hasLongPressed = true;
+                    openDayModal(dayDateString);
+                    if (navigator.vibrate) navigator.vibrate(50);
+                }, 500);
+            }, { passive: true });
+
+            cell.addEventListener('touchend', () => {
+                if (touchTimer) clearTimeout(touchTimer);
+            });
+
+            cell.addEventListener('touchmove', () => {
+                if (touchTimer) clearTimeout(touchTimer);
+            }, { passive: true });
+
+            cell.addEventListener('click', (e) => {
+                if (hasLongPressed) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    hasLongPressed = false;
+                } else {
+                    handleDayClick(e, dayDateString);
+                }
+            });
 
             if (state.selectedDate === dayDateString) {
                 cell.classList.add('selected');
