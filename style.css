@@ -1,20 +1,23 @@
 :root {
-    --bg-body: #f9fafb;
+    --bg-body: #f3f4f6;
     --bg-card: #ffffff;
-    --text-main: #1f2937;
+    --text-main: #111827;
     --text-muted: #6b7280;
-    --primary: #2563eb;
-    --primary-hover: #1d4ed8;
+    --primary: #3b82f6;
+    /* Modern Blue */
+    --primary-op: rgba(59, 130, 246, 0.1);
+    --primary-hover: #2563eb;
     --border: #e5e7eb;
-    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    --radius: 8px;
+    --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+    --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+    --radius: 12px;
 }
 
 * {
     box-sizing: border-box;
     margin: 0;
     padding: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
 body {
@@ -24,7 +27,48 @@ body {
     flex-direction: column;
     align-items: center;
     min-height: 100vh;
-    padding: 20px;
+    padding: 24px;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.year-select {
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 1.1rem;
+    background: transparent;
+    cursor: pointer;
+}
+
+.sync-status {
+    padding: 2px 8px;
+    border-radius: 20px;
+    background: #e5e7eb;
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+
+.relative {
+    position: relative;
+}
+
+.badge {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    background-color: #ef4444;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid var(--bg-card);
+}
+
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
 }
 
 .container {
@@ -607,4 +651,78 @@ input:checked+.slider:before {
 
 .text-sm {
     font-size: 0.75rem;
+}
+
+/* Notifications */
+.notifications-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.notification-item {
+    background-color: #f9fafb;
+    padding: 1rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.notification-info p {
+    margin: 0;
+    font-size: 0.9rem;
+}
+
+.notification-info .small {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.notification-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+/* WOW Features */
+
+/* Comparison Mode */
+.day-cell.compare-hit {
+    border: 3px solid var(--primary) !important;
+    box-shadow: inset 0 0 0 1px white;
+    /* optional contrast */
+    transform: scale(0.95);
+    transition: all 0.2s;
+}
+
+/* Special Days */
+.special-tag {
+    position: absolute;
+    top: 1px;
+    right: 1px;
+    font-size: 0.8rem;
+    line-height: 1;
+    z-index: 5;
+}
+
+.day-cell.special-viaje {
+    background-image: linear-gradient(45deg, #fef3c7 25%, transparent 25%, transparent 50%, #fef3c7 50%, #fef3c7 75%, transparent 75%, transparent);
+    background-size: 10px 10px;
+}
+
+.day-cell.special-feriado {
+    box-shadow: inset 0 0 10px #fecaca;
+}
+
+.day-cell.special-cumple {
+    border: 2px dotted #f472b6;
+}
+
+/* Legend */
+.calendar-legend {
+    background: var(--bg-card);
+    padding: 0.5rem;
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
 }

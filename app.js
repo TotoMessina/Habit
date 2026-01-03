@@ -18,7 +18,46 @@ let state = {
     year: 2026,
     selectedDate: null, // For keyboard navigation
     isSelectMode: false,
-    selectedDates: new Set() // For bulk selection
+    selectedDates: new Set(), // For bulk selection
+
+    // WOW Features State
+    specialDays: new Map(), // dateStr -> type
+    comparisonCalendar: null,
+    comparisonEntries: new Map(), // dateStr -> entry
+
+    // PRO State
+    syncStatus: 'idle', // idle, syncing, offline
+    pendingChanges: [] // Queue for retry (simplified)
+};
+
+const syncManager = {
+    setStatus: (status) => {
+        state.syncStatus = status;
+        const el = document.getElementById('sync-status');
+        if (status === 'syncing') el.textContent = '🔄 Guardando...';
+        else if (status === 'offline') el.textContent = '⚠️ Offline';
+        else el.textContent = '☁️ Al día';
+    },
+    saveToLocal: () => {
+        if (!state.currentCalendar) return;
+        const data = {
+            entries: Array.from(state.daysCache.entries()),
+            markers: state.markers,
+            timestamp: Date.now()
+        };
+        localStorage.setItem(`cal_${state.currentCalendar.id}_${state.year}`, JSON.stringify(data));
+    },
+    loadFromLocal: (calendarId) => {
+        const key = `cal_${calendarId}_${state.year}`;
+        const raw = localStorage.getItem(key);
+        if (raw) {
+            const data = JSON.parse(raw);
+            state.daysCache = new Map(data.entries);
+            // state.markers = data.markers; // Assume markers don't change often or fetched anyway
+            return true;
+        }
+        return false;
+    }
 };
 
 // *** ELEMENTOS DOM ***
@@ -41,6 +80,10 @@ const els = {
     formMarkerAdd: document.getElementById('form-marker-add'),
     markersList: document.getElementById('markers-list'),
     modalDay: document.getElementById('modal-day'),
+    modalNotifications: document.getElementById('modal-notifications'),
+    notificationsList: document.getElementById('notifications-list'),
+    btnNotifications: document.getElementById('btn-notifications'),
+    notificationBadge: document.getElementById('notification-badge'),
 
     // Day Modal Inputs
     dayTitle: document.getElementById('day-title'),
@@ -131,7 +174,10 @@ function setupEventListeners() {
             tab.classList.add('active');
             Object.values(els.views).forEach(hide);
             els.views[tab.dataset.tab].classList.remove('hidden');
-            if (tab.dataset.tab === 'stats') updateStatsView();
+            if (tab.dataset.tab === 'stats') {
+                updateStatsView();
+                setupCrossStats();
+            }
         });
     });
 
@@ -169,6 +215,24 @@ function setupEventListeners() {
     // Sharing
     els.btnShare.addEventListener('click', openShareModal);
     els.formShareAdd.addEventListener('submit', inviteUser);
+
+    // Notifications
+    els.btnNotifications.addEventListener('click', () => {
+        renderNotifications();
+        show(els.modalNotifications);
+    });
+
+    // WOW Features
+    document.getElementById('btn-compare-mode').addEventListener('click', openCompareModal);
+    document.getElementById('btn-clear-compare').addEventListener('click', clearComparison);
+
+    // Pro Features (Year)
+    document.getElementById('year-select').addEventListener('change', async (e) => {
+        state.year = parseInt(e.target.value);
+        if (state.currentCalendar) {
+            await loadCalendar(state.currentCalendar.id);
+        }
+    });
 }
 
 // ... (other code)
@@ -246,12 +310,13 @@ async function initApp() {
 
     if (errorOwned) return console.error("Error loading owned calendars:", errorOwned);
 
-    // B. Fetch Shared (via email)
+    // B. Fetch Shared (via email) AND Accepted
     // First get the IDs from calendar_shares
     const { data: shares, error: errorShares } = await supabaseClient
         .from('calendar_shares')
-        .select('calendar_id')
-        .eq('shared_with_email', userEmail);
+        .select('calendar_id, status')
+        .eq('shared_with_email', userEmail)
+        .eq('status', 'accepted'); // Only accepted
 
     let sharedCalendars = [];
     if (!errorShares && shares && shares.length > 0) {
@@ -275,6 +340,10 @@ async function initApp() {
     state.calendars.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
     renderCalendarSelect();
+
+    // Check Notifications (Pending Shares)
+    await checkNotifications();
+    await loadSpecialDays();
 
     if (state.calendars.length > 0) {
 
@@ -303,20 +372,33 @@ async function loadCalendar(calendarId) {
         .order('sort_order');
     state.markers = markers || [];
 
-    // Load Entries (All for 2026)
-    const { data: entries } = await supabaseClient
+    // Try Local Cache First
+    const hasLocal = syncManager.loadFromLocal(calendarId);
+    if (hasLocal) {
+        renderCalendarGrid();
+        updateStatsView(); // Immediate render
+    }
+
+    // Load Entries (All for selected year)
+    syncManager.setStatus('syncing');
+    const { data: entries, error } = await supabaseClient
         .from('day_entries')
         .select('*')
         .eq('calendar_id', calendarId)
         .gte('date', `${state.year}-01-01`)
         .lte('date', `${state.year}-12-31`);
 
+    syncManager.setStatus(error ? 'offline' : 'idle');
+
     if (entries) {
         entries.forEach(entry => state.daysCache.set(entry.date, entry));
+        syncManager.saveToLocal(); // Update cache with fresh server data
     }
 
     renderCalendarGrid();
+    updateStatsView();
 }
+
 
 // *** RENDERING CALENDAR ***
 function renderCalendarSelect() {
@@ -423,6 +505,24 @@ function renderCalendarGrid() {
                 cell.classList.add('selected');
             }
 
+            // WOW: Comparison Visuals
+            const compEntry = state.comparisonEntries.get(dayDateString);
+            if (compEntry && compEntry.primary_done) {
+                cell.classList.add('compare-hit');
+            }
+
+            // WOW: Special Days Visuals
+            if (state.specialDays.has(dayDateString)) {
+                const type = state.specialDays.get(dayDateString);
+                cell.classList.add(`special-${type}`);
+
+                const emojiMap = { 'viaje': '✈️', 'enfermo': '🤒', 'feriado': '🎉', 'cumple': '🎂', 'evento': '📅' };
+                const tag = document.createElement('span');
+                tag.className = 'special-tag';
+                tag.textContent = emojiMap[type] || '★';
+                cell.appendChild(tag);
+            }
+
             grid.appendChild(cell);
         }
 
@@ -485,7 +585,9 @@ async function inviteUser(e) {
 
     const { data, error } = await supabaseClient.from('calendar_shares').insert({
         calendar_id: state.currentCalendar.id,
-        shared_with_email: email
+        owner_id: state.user.id, // Explicitly send owner ID
+        shared_with_email: email,
+        status: 'pending' // Default status
     }).select();
 
     if (error) {
@@ -506,6 +608,103 @@ window.revokeAccess = async (shareId) => {
         alert("Error al eliminar acceso.");
     }
 }
+
+// *** NOTIFICATIONS LOGIC ***
+async function checkNotifications() {
+    const { count, error } = await supabaseClient
+        .from('calendar_shares')
+        .select('*', { count: 'exact', head: true })
+        .eq('shared_with_email', state.user.email)
+        .eq('status', 'pending');
+
+    if (!error && count > 0) {
+        els.notificationBadge.classList.remove('hidden');
+    } else {
+        els.notificationBadge.classList.add('hidden');
+    }
+}
+
+async function renderNotifications() {
+    els.notificationsList.innerHTML = '<p class="text-muted">Cargando...</p>';
+
+    // Get pending shares with calendar details
+    // We need to fetch shares first, then calendar names manually since we don't have join setup easily in JS client without foreign key hint sometimes, 
+    // but assuming RLS allows seeing the calendar if invited? 
+    // Actually, usually you can't see the calendar name if you haven't accepted? 
+    // Let's assume for this "pending" state we might need a join or just fetch `calendars` table where id is in shares.
+
+    const { data: shares, error } = await supabaseClient
+        .from('calendar_shares')
+        .select('*')
+        .eq('shared_with_email', state.user.email)
+        .eq('status', 'pending');
+
+    if (error || !shares || shares.length === 0) {
+        els.notificationsList.innerHTML = '<p class="text-muted text-sm">No tienes invitaciones pendientes.</p>';
+        return;
+    }
+
+    // Fetch calendar names
+    const calendarIds = shares.map(s => s.calendar_id);
+    const { data: calendars } = await supabaseClient
+        .from('calendars')
+        .select('id, name, user_id') // We might want to show who invited (owner) logic is slightly complex if owner not stored in share, but we can get it from calendar
+        .in('id', calendarIds);
+
+    const calendarMap = new Map();
+    if (calendars) calendars.forEach(c => calendarMap.set(c.id, c));
+
+    els.notificationsList.innerHTML = shares.map(s => {
+        const cal = calendarMap.get(s.calendar_id);
+        const name = cal ? cal.name : 'Calendario desconocido';
+        return `
+        <div class="notification-item">
+            <div class="notification-info">
+                <p>Invitación a <strong>${name}</strong></p>
+                <span class="small">Te han invitado a colaborar</span>
+            </div>
+            <div class="notification-actions">
+                <button class="btn btn-sm btn-primary" onclick="respondToShare('${s.id}', 'accept')">✅</button>
+                <button class="btn btn-sm btn-ghost" style="color:red;" onclick="respondToShare('${s.id}', 'reject')">❌</button>
+            </div>
+        </div>
+        `;
+    }).join('');
+}
+
+window.respondToShare = async (shareId, action) => {
+    if (action === 'accept') {
+        const { error } = await supabaseClient
+            .from('calendar_shares')
+            .update({ status: 'accepted' })
+            .eq('id', shareId);
+
+        if (!error) {
+            checkNotifications();
+            renderNotifications(); // Refresh list
+            // Reload app/calendars to show the new one
+            await initApp();
+            // Better UX: Show toast?
+            closeModal(els.modalNotifications);
+            alert("¡Calendario agregado exitosamente!");
+        } else {
+            alert("Error al aceptar.");
+        }
+    } else {
+        if (!confirm("¿Rechazar invitación?")) return;
+        const { error } = await supabaseClient
+            .from('calendar_shares')
+            .delete() // Rejecting = deleting the invite
+            .eq('id', shareId);
+
+        if (!error) {
+            checkNotifications();
+            renderNotifications();
+        } else {
+            alert("Error al rechazar.");
+        }
+    }
+};
 
 // *** LOGIC: CREATE CALENDAR ***
 async function createCalendar(e) {
@@ -547,13 +746,15 @@ async function createMarker(e) {
 
     const label = document.getElementById('marker-label').value;
     const symbol = document.getElementById('marker-symbol').value;
-    const key = `m_${Date.now()}`; // Simple unique key
+    const group = document.getElementById('marker-group').value || null;
+    const key = `m_${Date.now()}`;
 
     const { data, error } = await supabaseClient.from('calendar_markers').insert({
         calendar_id: state.currentCalendar.id,
         key,
         label,
-        symbol
+        symbol,
+        group_name: group
     }).select().single();
 
     if (error) {
@@ -565,7 +766,7 @@ async function createMarker(e) {
     renderMarkersList();
     document.getElementById('marker-label').value = '';
     document.getElementById('marker-symbol').value = '';
-    // Refresh calendar view to update days if needed (unlikely for new marker but safe)
+    document.getElementById('marker-group').value = '';
     renderCalendarGrid();
 }
 
@@ -807,16 +1008,29 @@ async function toggleDayMarkerOptimistic(dateString, markerKey = null) {
 
     // Default to first marker if not key provided (Shift+Click)
     const targetKey = markerKey || state.markers[0].key;
+    const targetMarkerDef = state.markers.find(m => m.key === targetKey);
 
     const entry = state.daysCache.get(dateString) || { calendar_id: state.currentCalendar.id, date: dateString, primary_done: false, markers: {}, note: '' };
     if (!entry.markers) entry.markers = {};
 
     const newValue = !entry.markers[targetKey];
 
+    // Exclusive Logic (Group)
+    if (newValue && targetMarkerDef && targetMarkerDef.group_name) {
+        // Disable other markers in same group
+        state.markers.forEach(m => {
+            if (m.group_name === targetMarkerDef.group_name && m.key !== targetKey) {
+                entry.markers[m.key] = false;
+            }
+        });
+    }
+
     // 1. Optimistic
     entry.markers[targetKey] = newValue;
     state.daysCache.set(dateString, entry);
     updateDayVisual(dateString, entry);
+    syncManager.saveToLocal(); // PRO: Update Local
+    syncManager.setStatus('syncing');
 
     // 2. Network
     const { error } = await supabaseClient
@@ -824,9 +1038,12 @@ async function toggleDayMarkerOptimistic(dateString, markerKey = null) {
         .upsert(entry, { onConflict: 'calendar_id, date' });
 
     if (error) {
-        entry.markers[targetKey] = !newValue;
-        updateDayVisual(dateString, entry);
-        alert("Error al guardar marcador");
+        syncManager.setStatus('offline');
+        // entry.markers[targetKey] = !newValue; // Revert optional
+        // updateDayVisual(dateString, entry);
+        // alert("Error al guardar marcador");
+    } else {
+        syncManager.setStatus('idle');
     }
 }
 
@@ -870,6 +1087,9 @@ function openDayModal(dateString) {
     els.dayCheckPrimary.checked = entry.primary_done;
     els.dayPrimaryLabel.textContent = state.currentCalendar.primary_label;
     els.dayNote.value = entry.note || '';
+
+    // WOW: Special Day
+    document.getElementById('day-special-type').value = state.specialDays.get(dateString) || '';
 
     // Render Markers Toggles
     els.dayMarkersContainer.innerHTML = state.markers.map(m => {
@@ -924,6 +1144,11 @@ async function saveDayEntry() {
     }
 
     state.daysCache.set(currentEditingDate, data);
+
+    // WOW: Save Special Day
+    const specialType = document.getElementById('day-special-type').value;
+    await saveSpecialDayLogic(currentEditingDate, specialType);
+
     renderCalendarGrid();
     closeModal(els.modalDay);
 }
@@ -1079,47 +1304,65 @@ function renderGoals(totalDone) {
 }
 
 function renderWeekdayChart(counts, maxVal) {
-    const days = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
-    els.statWeekdayChart.innerHTML = counts.map((count, idx) => {
-        // Avoid div by zero
-        const height = maxVal > 0 ? (count / maxVal) * 100 : 0;
-        return `
-            <div class="weekday-col">
-                <div class="weekday-bar" style="height: ${height}%;" title="${count} veces"></div>
-                <span class="weekday-name">${days[idx]}</span>
-            </div>
-        `;
-    }).join('');
+    const ctx = document.getElementById('chart-weekday');
+    if (chartWeekday) chartWeekday.destroy();
+
+    chartWeekday = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'],
+            datasets: [{
+                label: 'Frecuencia',
+                data: counts,
+                backgroundColor: 'rgba(16, 185, 129, 0.6)',
+                borderRadius: 4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: { y: { display: false } }
+        }
+    });
 }
 
 function renderTrendChart(doneEntries) {
-    // Show last 3 months trend compared to average?
-    // Or just simple monthly bars again? The user asked for "evolution (up/down)".
-    // Let's repurpose the trend chart to show Monthly Average vs Global Average?
-    // OR: Weekly averages for the last 4 weeks.
+    // Calculate Monthly Totals for Trend Line
+    const monthlyCounts = new Array(12).fill(0);
+    doneEntries.forEach(e => {
+        const month = parseInt(e.date.split('-')[1]) - 1;
+        if (month >= 0 && month < 12) monthlyCounts[month]++;
+    });
 
-    // Let's do simple: Textual trend for now "Trending Up/Down" based on last month vs this month.
+    const ctx = document.getElementById('chart-trend');
+    if (chartTrend) chartTrend.destroy();
 
+    // Filter out future months for cleaner look? or show all
     const currentMonth = new Date().getMonth();
-    const doneThisMonth = doneEntries.filter(e => new Date(e.date).getMonth() === currentMonth).length;
+    const dataToShow = monthlyCounts.slice(0, currentMonth + 1);
+    const labelsToShow = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'].slice(0, currentMonth + 1);
 
-    const prevMonth = currentMonth === 0 ? 11 : currentMonth - 1;
-    const donePrevMonth = doneEntries.filter(e => new Date(e.date).getMonth() === prevMonth).length;
-
-    let trendHtml = '';
-    const diff = doneThisMonth - donePrevMonth;
-
-    if (diff > 0) trendHtml = `<span style="color:var(--primary)">📈 +${diff} vs mes anterior</span>`;
-    else if (diff < 0) trendHtml = `<span style="color:#ef4444">📉 ${diff} vs mes anterior</span>`;
-    else trendHtml = `<span class="text-muted">➡ Igual que mes anterior</span>`;
-
-    els.statTrendChart.innerHTML = `
-        <div style="display:flex; flex-direction:column; align-items:center; width:100%; justify-content:center;">
-             <p style="font-size:1.5rem; font-weight:bold;">${doneThisMonth}</p>
-             <p class="text-muted">Este mes</p>
-             <div style="margin-top:0.5rem">${trendHtml}</div>
-        </div>
-    `;
+    chartTrend = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labelsToShow,
+            datasets: [{
+                label: 'Tendencia',
+                data: dataToShow,
+                borderColor: '#8b5cf6',
+                tension: 0.4,
+                fill: true,
+                backgroundColor: 'rgba(139, 92, 246, 0.1)'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true } }
+        }
+    });
 }
 
 function calculateDaysPassed() {
@@ -1159,20 +1402,41 @@ function calculateStreak() {
     return streak;
 }
 
+// *** STATS: Chart.js Implementations ***
+let chartMonthly = null;
+let chartWeekday = null;
+let chartTrend = null;
+
 function renderStatsChart(doneEntries) {
-    // 12 bars for months
     const monthlyCounts = new Array(12).fill(0);
     doneEntries.forEach(e => {
         const month = parseInt(e.date.split('-')[1]) - 1;
         if (month >= 0 && month < 12) monthlyCounts[month]++;
     });
 
-    els.statChart.innerHTML = monthlyCounts.map((count, idx) => {
-        const daysInMonth = new Date(state.year, idx + 1, 0).getDate();
-        const heightPct = Math.round((count / daysInMonth) * 100);
-        const monthName = ['E', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'][idx];
-        return `<div class="chart-bar" style="height: ${heightPct}%;" title="${monthName}: ${count}"></div>`;
-    }).join('');
+    const ctx = document.getElementById('chart-monthly');
+    if (chartMonthly) chartMonthly.destroy();
+
+    chartMonthly = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'],
+            datasets: [{
+                label: 'Días Cumplidos',
+                data: monthlyCounts,
+                backgroundColor: 'rgba(59, 130, 246, 0.6)',
+                borderColor: 'rgba(59, 130, 246, 1)',
+                borderWidth: 1,
+                borderRadius: 4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: { y: { beginAtZero: true, max: 31 } },
+            plugins: { legend: { display: false } }
+        }
+    });
 }
 
 function renderMarkerStats(entries) {
@@ -1204,6 +1468,168 @@ function renderMarkerStats(entries) {
             </div>
         `;
     }).join('');
+}
+
+
+
+// *** WOW FEATURES ***
+
+async function loadSpecialDays() {
+    state.specialDays.clear();
+    const { data, error } = await supabaseClient
+        .from('special_days')
+        .select('*')
+        .eq('user_id', state.user.id)
+        .gte('date', `${state.year}-01-01`)
+        .lte('date', `${state.year}-12-31`);
+
+    if (data) {
+        data.forEach(d => state.specialDays.set(d.date, d.type));
+    }
+}
+
+async function saveSpecialDayLogic(date, type) {
+    if (!state.user) return;
+
+    if (!type) {
+        // Delete if exists
+        await supabaseClient.from('special_days').delete().eq('user_id', state.user.id).eq('date', date);
+        state.specialDays.delete(date);
+    } else {
+        // Upsert
+        const { error } = await supabaseClient.from('special_days').upsert({
+            user_id: state.user.id,
+            date: date,
+            type: type
+        }, { onConflict: 'user_id, date' });
+
+        if (!error) state.specialDays.set(date, type);
+    }
+}
+
+// Comparison
+function openCompareModal() {
+    show(document.getElementById('modal-compare'));
+    const list = document.getElementById('compare-list');
+    list.innerHTML = state.calendars
+        .filter(c => c.id !== state.currentCalendar.id)
+        .map(c => `
+            <div class="share-item" onclick="setComparison('${c.id}')" style="cursor:pointer; padding: 1rem; hover:bg-gray-100;">
+                <span>${c.name}</span>
+                <span class="btn btn-sm btn-outline">Elegir</span>
+            </div>
+        `).join('') || '<p class="text-muted">No hay otros calendarios para comparar.</p>';
+}
+
+async function setComparison(calendarId) {
+    state.comparisonCalendar = state.calendars.find(c => c.id === calendarId);
+    state.comparisonEntries.clear();
+
+    // Fetch entries
+    const { data: entries } = await supabaseClient
+        .from('day_entries')
+        .select('*')
+        .eq('calendar_id', calendarId)
+        .gte('date', `${state.year}-01-01`)
+        .lte('date', `${state.year}-12-31`);
+
+    if (entries) {
+        entries.forEach(e => state.comparisonEntries.set(e.date, e));
+    }
+
+    closeModal(document.getElementById('modal-compare'));
+    document.getElementById('legend-secondary').classList.remove('hidden');
+    document.getElementById('calendar-legend').classList.remove('hidden');
+    renderCalendarGrid();
+}
+
+function clearComparison() {
+    state.comparisonCalendar = null;
+    state.comparisonEntries.clear();
+    document.getElementById('calendar-legend').classList.add('hidden');
+    renderCalendarGrid();
+    closeModal(document.getElementById('modal-compare'));
+}
+
+// Analytics Cross
+async function setupCrossStats() {
+    const s1 = document.getElementById('stats-cross-source');
+    const s2 = document.getElementById('stats-cross-target');
+
+    const opts = state.calendars.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+    s1.innerHTML = opts;
+    s2.innerHTML = opts;
+
+    // Select different defaults if possible
+    if (state.calendars.length > 1) {
+        s2.value = state.calendars[1].id;
+    }
+
+    calculateCrossAnalytics();
+
+    s1.onchange = calculateCrossAnalytics;
+    s2.onchange = calculateCrossAnalytics;
+}
+
+async function calculateCrossAnalytics() {
+    const idA = document.getElementById('stats-cross-source').value;
+    const idB = document.getElementById('stats-cross-target').value;
+    const resultEl = document.getElementById('cross-stats-result');
+
+    if (idA === idB) {
+        resultEl.innerHTML = '<p class="text-muted">Elige calendarios distintos</p>';
+        return;
+    }
+
+    // Need data for both. 
+    // Optimization: check if we have them in cache or fetch.
+    // For simplicity, fetch fresh or assume current logic.
+    // Ideally we should cache all calendar data or fetch on demand.
+
+    const [entriesA, entriesB] = await Promise.all([
+        fetchEntriesForAnalysis(idA),
+        fetchEntriesForAnalysis(idB)
+    ]);
+
+    // Logic: P(B|A)
+    // Count(A done)
+    // Count(A done AND B done)
+
+    let countA = 0;
+    let countBoth = 0;
+
+    const setA = new Set(entriesA.filter(e => e.primary_done).map(e => e.date));
+    const setB = new Set(entriesB.filter(e => e.primary_done).map(e => e.date)); // Optimization
+
+    setA.forEach(date => {
+        countA++;
+        if (setB.has(date)) countBoth++;
+    });
+
+    if (countA === 0) {
+        resultEl.innerHTML = '<p class="text-muted">Sin datos suficientes en ' + (state.calendars.find(c => c.id == idA)?.name) + '</p>';
+        return;
+    }
+
+    const percent = Math.round((countBoth / countA) * 100);
+    resultEl.innerHTML = `
+        <p style="font-size: 2.5rem; font-weight: bold; color: var(--primary); margin: 0;">${percent}%</p>
+        <p class="text-sm text-muted">(${countBoth} de ${countA} veces)</p>
+    `;
+}
+
+async function fetchEntriesForAnalysis(calId) {
+    if (state.currentCalendar && state.currentCalendar.id === calId) {
+        return Array.from(state.daysCache.values());
+    }
+    // Fetch
+    const { data } = await supabaseClient
+        .from('day_entries')
+        .select('date, primary_done')
+        .eq('calendar_id', calId)
+        .gte('date', `${state.year}-01-01`)
+        .lte('date', `${state.year}-12-31`);
+    return data || [];
 }
 
 
