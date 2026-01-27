@@ -182,16 +182,26 @@ function setupEventListeners() {
     // Navigation
     els.tabs.forEach(tab => {
         tab.addEventListener('click', () => {
+            // Check if view exists first (to avoid errors if dashboard is partial)
+            const targetView = document.getElementById(`view-${tab.dataset.tab}`);
+            if (!targetView) return;
+
             els.tabs.forEach(t => t.classList.remove('active'));
             tab.classList.add('active');
-            Object.values(els.views).forEach(hide);
-            els.views[tab.dataset.tab].classList.remove('hidden');
+
+            // Hide all views manually or via helper
+            document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
+            targetView.classList.remove('hidden');
+
             if (tab.dataset.tab === 'stats') {
                 updateStatsView();
                 setupCrossStats();
             }
             if (tab.dataset.tab === 'lists') {
                 loadCollections();
+            }
+            if (tab.dataset.tab === 'dashboard') {
+                renderDashboard();
             }
         });
     });
@@ -240,6 +250,7 @@ function setupEventListeners() {
     // WOW Features
     document.getElementById('btn-compare-mode').addEventListener('click', openCompareModal);
     document.getElementById('btn-clear-compare').addEventListener('click', clearComparison);
+    document.getElementById('stats-filter-month').addEventListener('change', updateStatsView);
 
     // Pro Features (Year)
     document.getElementById('year-select').addEventListener('change', async (e) => {
@@ -371,13 +382,16 @@ async function initApp() {
     await loadSpecialDays();
 
     if (state.calendars.length > 0) {
-
-        await loadCalendar(state.calendars[0].id);
+        // Load initial views in parallel
+        const p1 = loadCalendar(state.calendars[0].id);
+        const p2 = renderDashboard();
+        await Promise.all([p1, p2]);
     } else {
         // Prompt to create one or create a default one
         // For UX, maybe just show new calendar modal if none exist
         els.calendarSelect.innerHTML = '<option>Crea un calendario</option>';
         show(els.modalCalendar);
+        renderDashboard();
     }
 }
 
@@ -633,6 +647,259 @@ window.revokeAccess = async (shareId) => {
         alert("Error al eliminar acceso.");
     }
 }
+
+// *** DASHBOARD LOGIC ***
+// *** DASHBOARD LOGIC ***
+async function renderDashboard() {
+    const grid = document.getElementById('dashboard-grid');
+    grid.innerHTML = '<p class="text-muted">Actualizando dashboard...</p>';
+
+    // Use cached calendars from state
+    const calendars = state.calendars;
+
+    if (!calendars || calendars.length === 0) {
+        grid.innerHTML = '<p>No tienes hábitos creados. Crea uno nuevo.</p>';
+        return;
+    }
+
+    const today = new Date();
+    const dateStr = formatDate(today);
+
+    // 1. Calculate History Range (Last 14 days for stats)
+    // We fetch a bit more than just today to calculate streaks and show mini-chart
+    const startHistory = new Date(today);
+    startHistory.setDate(today.getDate() - 14);
+    const startStr = formatDate(startHistory);
+
+    // 2. Fetch Data in Parallel
+    // A: Markers for all these calendars
+    const pMarkers = supabaseClient
+        .from('calendar_markers')
+        .select('*')
+        .in('calendar_id', calendars.map(c => c.id))
+        .order('sort_order');
+
+    // B: Entries for last 14 days (includes today)
+    const pEntries = supabaseClient
+        .from('day_entries')
+        .select('*')
+        .gte('date', startStr)
+        .lte('date', dateStr)
+        .in('calendar_id', calendars.map(c => c.id));
+
+    const [resMarkers, resEntries] = await Promise.all([pMarkers, pEntries]);
+
+    if (resEntries.error || resMarkers.error) {
+        console.error("Dashboard Error", resEntries.error || resMarkers.error);
+        grid.innerHTML = '<p style="color:red">Error cargando dashboard.</p>';
+        return;
+    }
+
+    const allMarkers = resMarkers.data || [];
+    const allEntries = resEntries.data || [];
+
+    // 3. Process Data
+    const calendarMarkers = new Map(); // calId -> [markers]
+    allMarkers.forEach(m => {
+        if (!calendarMarkers.has(m.calendar_id)) calendarMarkers.set(m.calendar_id, []);
+        calendarMarkers.get(m.calendar_id).push(m);
+    });
+
+    const calendarEntries = new Map(); // calId -> { dateStr: entry }
+    allEntries.forEach(e => {
+        if (!calendarEntries.has(e.calendar_id)) calendarEntries.set(e.calendar_id, {});
+        calendarEntries.get(e.calendar_id)[e.date] = e;
+    });
+
+    // 4. Render
+    grid.innerHTML = '';
+
+    calendars.forEach(cal => {
+        const entriesMap = calendarEntries.get(cal.id) || {};
+        const markers = calendarMarkers.get(cal.id) || [];
+
+        // Today's Status
+        const todayEntry = entriesMap[dateStr] || {};
+        const isDone = !!todayEntry.primary_done;
+
+        // Calculate Streak (Simplified based on recent cache)
+        // For accurate streak we might need more history, but let's use what we fetched + logic
+        // or just calculate "Last 7 days" completion. 
+        // Real Streak requires fetching backwards until break. 
+        // Let's show "Weekly Consurency" (days in last 7) to be safe/fast,
+        // OR calculate simple streak from the 14 days buffer.
+        let localStreak = 0;
+        if (isDone) localStreak = 1;
+        // Check days before
+        for (let i = 1; i < 14; i++) {
+            const d = new Date(today);
+            d.setDate(d.getDate() - i);
+            const dStr = formatDate(d);
+            if (entriesMap[dStr] && entriesMap[dStr].primary_done) {
+                localStreak++;
+            } else {
+                // If yesterday (i=1) is missing, streak is 0?
+                // If today is NOT done, check if yesterday IS done to show "current streak".
+                if (i === 1 && !isDone) localStreak = 0; // Reset if today incomplete? No, commonly show previous streak until broken.
+                // Re-logic:
+                // If today is done: streak includes today + contiguous past.
+                // If today is NOT done: streak is contiguous past up to yesterday.
+                if (!isDone && i === 1) {
+                    if (entriesMap[dStr] && entriesMap[dStr].primary_done) localStreak = 1;
+                    else break;
+                } else if (!isDone && i > 1) {
+                    // continuing past streak
+                    if (localStreak > 0) localStreak++;
+                    else break;
+                } else if (isDone) {
+                    // normal
+                }
+
+                // Keep it simple: Continuous days ending today or yesterday.
+                // (This logic is complex to inline, let's just count days in last 7 for visual appeal "x/7")
+                break;
+            }
+        }
+
+        // Mini Chart (Last 7 days)
+        let weekDotsHtml = '<div class="week-dots" style="display:flex; gap:4px; margin-top:8px;">';
+        const dotsDate = new Date(today);
+        dotsDate.setDate(today.getDate() - 6); // Start 6 days ago
+        for (let i = 0; i < 7; i++) {
+            const dStr = formatDate(dotsDate);
+            const done = entriesMap[dStr] && entriesMap[dStr].primary_done;
+            const isToday = dStr === dateStr;
+            const color = done ? (cal.primary_on_color || '#4ade80') : '#e5e7eb';
+            const border = isToday ? '2px solid #666' : 'none';
+
+            weekDotsHtml += `<div title="${dStr}" style="width:10px; height:10px; border-radius:50%; background:${color}; border:${border};"></div>`;
+            dotsDate.setDate(dotsDate.getDate() + 1);
+        }
+        weekDotsHtml += '</div>';
+
+        // Markers HTML
+        let markersHtml = '';
+        if (markers.length > 0) {
+            markersHtml = '<div class="dashboard-markers" style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">';
+            markers.forEach(m => {
+                const isActive = todayEntry.markers && todayEntry.markers[m.key];
+                const activeStyle = isActive ? `background:${cal.primary_on_color}; border-color:${cal.primary_on_color}; color:white;` : '';
+                markersHtml += `
+                    <button class="btn-xs marker-btn" 
+                        style="border:1px solid #ccc; border-radius:12px; padding:2px 8px; font-size:0.8rem; cursor:pointer; background:white; ${activeStyle}"
+                        onclick="toggleDashboardMarker('${cal.id}', '${dateStr}', '${m.key}')">
+                        ${m.symbol} ${m.label}
+                    </button>
+                `;
+            });
+            markersHtml += '</div>';
+        }
+
+        const card = document.createElement('div');
+        card.className = `dashboard-card ${isDone ? 'done' : ''}`;
+
+        // Inline CSS for improved styling
+        card.style.padding = '1rem';
+        card.style.borderRadius = '12px';
+        card.style.background = isDone ? '#f0fdf4' : 'white';
+        card.style.border = '1px solid ' + (isDone ? '#bbf7d0' : '#e5e7eb');
+        card.style.boxShadow = '0 2px 4px rgba(0,0,0,0.05)';
+        card.style.marginBottom = '1rem';
+
+        card.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                <div>
+                    <h3 style="margin:0; font-size:1.1rem; color:#1f2937;">${cal.name}</h3>
+                    <p class="text-xs text-muted" style="margin:0;">${cal.primary_label || 'Hábito'}</p>
+                </div>
+                <div style="text-align:right;">
+                    <span class="text-xs text-muted" style="font-weight:600;">🔥 Racha?</span>
+                    <div style="font-size:1.2rem; font-weight:bold; color:#f59e0b; line-height:1;">
+                        ${localStreak} <span style="font-size:0.8rem;">días</span>
+                    </div>
+                </div>
+            </div>
+
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:1rem;">
+                <!-- Main Check -->
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:500;">
+                    <input type="checkbox" style="width:1.2rem; height:1.2rem;" 
+                        ${isDone ? 'checked' : ''} 
+                        onchange="toggleDashboardHabit('${cal.id}', '${dateStr}', this.checked)">
+                    <span>${isDone ? '¡Completado!' : 'Marcar hoy'}</span>
+                </label>
+                
+                <!-- Weekly Dots -->
+                ${weekDotsHtml}
+            </div>
+
+            <!-- Markers -->
+             ${markersHtml}
+        `;
+        grid.appendChild(card);
+    });
+
+    const titleEl = document.getElementById('dashboard-date-title');
+    if (titleEl) titleEl.textContent = today.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
+}
+
+window.toggleDashboardMarker = async (calId, dateStr, markerKey) => {
+    // 1. Fetch current (or use cache/optimistic) - Let's use cache-first optimistic
+    // Note: We don't have easy access to state.daysCache entry for specific marker in dashboard view 
+    // without refreshing. Let's do a quick fetch-modify-save.
+
+    // Optimistic UI: toggle class visually immediately? 
+    // Hard to target generic button. Let's reload dashboard after short delay or just fetch.
+
+    const { data: current, error } = await supabaseClient
+        .from('day_entries')
+        .select('*')
+        .eq('calendar_id', calId)
+        .eq('date', dateStr)
+        .single();
+
+    let entry = current;
+    if (!entry) {
+        // Create if doesn't exist
+        entry = { calendar_id: calId, date: dateStr, primary_done: false, markers: {} };
+    }
+    if (!entry.markers) entry.markers = {};
+
+    // Toggle
+    const newVal = !entry.markers[markerKey];
+    entry.markers[markerKey] = newVal;
+
+    // Save
+    const { error: saveError } = await supabaseClient
+        .from('day_entries')
+        .upsert(entry);
+
+    if (!saveError) {
+        renderDashboard(); // Re-render to show state
+    }
+};
+
+window.toggleDashboardHabit = async (calId, dateStr, isChecked) => {
+    const { error } = await supabaseClient
+        .from('day_entries')
+        .upsert({
+            calendar_id: calId,
+            date: dateStr,
+            primary_done: isChecked
+        }, { onConflict: 'calendar_id, date' });
+
+    if (error) {
+        console.error('Error toggling dashboard', error);
+        alert('Error al actualizar');
+    } else {
+        renderDashboard();
+        // Sync cache if needed
+        if (state.currentCalendar && state.currentCalendar.id === calId) {
+            // Invalidate or update cache? 
+            // Simplest is to let loadCalendar handle it when switching views
+        }
+    }
+};
 
 // *** NOTIFICATIONS LOGIC ***
 async function checkNotifications() {
@@ -1104,7 +1371,9 @@ let currentEditingDate = null;
 
 function openDayModal(dateString) {
     currentEditingDate = dateString;
-    els.dayTitle.textContent = new Date(dateString).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    const [y, m, d] = dateString.split('-').map(Number);
+    const dateObj = new Date(y, m - 1, d); // Create as Local Time
+    els.dayTitle.textContent = dateObj.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
     const entry = state.daysCache.get(dateString) || { primary_done: false, markers: {}, note: '' };
 
@@ -1185,8 +1454,20 @@ async function saveDayEntry() {
 function updateStatsView() {
     if (!state.currentCalendar) return;
 
-    const entries = Array.from(state.daysCache.values());
-    const totalDays = calculateDaysPassed(); // implement logic up to today
+    let entries = Array.from(state.daysCache.values());
+    const filterVal = document.getElementById('stats-filter-month').value;
+
+    // Filter by Month if selected
+    if (filterVal !== 'all') {
+        const month = parseInt(filterVal);
+        entries = entries.filter(e => new Date(e.date).getMonth() === month);
+        // Note: This filters keys for calculation.
+        // For Heatmap, we might want to show whole year still? Or zoom?
+        // Let's keep heatmap as year view for now, effectively only stats numbers change.
+    }
+
+    // Adjust "Total Potential Days" based on filter
+    const totalDays = calculateDaysPassed(filterVal);
     const doneEntries = entries.filter(e => e.primary_done);
     const totalDone = doneEntries.length;
 
@@ -1201,6 +1482,9 @@ function updateStatsView() {
 
     // Marker Stats
     renderMarkerStats(entries);
+
+    // Heatmap
+    renderHeatmap(entries);
 
     // Advanced Stats
     updateAdvancedStats(entries, doneEntries);
@@ -1393,14 +1677,36 @@ function renderTrendChart(doneEntries) {
     });
 }
 
-function calculateDaysPassed() {
+function calculateDaysPassed(filterVal = 'all') {
     const start = new Date(state.year, 0, 1);
     const now = new Date();
-    const end = now.getFullYear() === state.year ? now : new Date(state.year, 11, 31);
+    // If future year
+    if (now.getFullYear() < state.year) return 0;
 
-    if (now.getFullYear() < state.year) return 0; // Not started
+    let endCalc = now.getFullYear() === state.year ? now : new Date(state.year, 11, 31);
+    let startCalc = start;
 
-    const diff = end - start;
+    if (filterVal !== 'all') {
+        const month = parseInt(filterVal);
+        // Start of that month
+        startCalc = new Date(state.year, month, 1);
+        // End of that month
+        const endOfMonth = new Date(state.year, month + 1, 0);
+
+        // If month is in future relative to now?
+        // If current month, end at today used?
+        // Let's cap at today if in current year.
+        if (state.year === now.getFullYear()) {
+            if (month > now.getMonth()) return 0; // Future month
+            if (month === now.getMonth()) endCalc = now;
+            else endCalc = endOfMonth;
+        } else {
+            endCalc = endOfMonth;
+        }
+    }
+
+    const diff = endCalc - startCalc;
+    if (diff < 0) return 0;
     return Math.floor(diff / (1000 * 60 * 60 * 24)) + 1;
 }
 
@@ -1452,17 +1758,38 @@ function renderStatsChart(doneEntries) {
             datasets: [{
                 label: 'Días Cumplidos',
                 data: monthlyCounts,
-                backgroundColor: 'rgba(59, 130, 246, 0.6)',
-                borderColor: 'rgba(59, 130, 246, 1)',
-                borderWidth: 1,
-                borderRadius: 4
+                backgroundColor: 'rgba(59, 130, 246, 0.7)',
+                hoverBackgroundColor: 'rgba(59, 130, 246, 1)',
+                borderRadius: 4,
+                borderSkipped: false
             }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            scales: { y: { beginAtZero: true, max: 31 } },
-            plugins: { legend: { display: false } }
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    max: 31,
+                    grid: { color: '#f3f4f6' },
+                    ticks: { color: '#9ca3af' }
+                },
+                x: {
+                    grid: { display: false },
+                    ticks: { color: '#6b7280' }
+                }
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: '#1f2937',
+                    titleColor: '#f9fafb',
+                    bodyColor: '#f9fafb',
+                    padding: 10,
+                    cornerRadius: 8,
+                    displayColors: false
+                }
+            }
         }
     });
 }
@@ -1496,6 +1823,48 @@ function renderMarkerStats(entries) {
             </div>
         `;
     }).join('');
+}
+
+function renderHeatmap(entries) {
+    const grid = document.getElementById('heatmap-grid');
+    grid.innerHTML = '';
+
+    // Determine year range
+    const start = new Date(state.year, 0, 1);
+    const end = new Date(state.year, 11, 31);
+
+    // Map date -> level
+    const dataMap = new Map();
+    entries.forEach(e => {
+        if (e.primary_done) dataMap.set(e.date, 4);
+    });
+
+    // We iterate all days
+    // Logic: Fill columns text-top-to-bottom (weekdays).
+    // So we assume the grid flows column-wise.
+    // We need to pad the start if Jan 1 is not Sunday.
+    const startDay = start.getDay();
+    for (let i = 0; i < startDay; i++) {
+        const empty = document.createElement('div');
+        empty.className = 'heatmap-cell';
+        empty.style.backgroundColor = 'transparent';
+        grid.appendChild(empty);
+    }
+
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        const dateStr = formatDate(d);
+        const level = dataMap.get(dateStr) || 0;
+
+        const cell = document.createElement('div');
+        cell.className = 'heatmap-cell';
+        cell.dataset.date = dateStr;
+        if (level > 0) cell.dataset.level = level;
+
+        const datePretty = d.toLocaleDateString('es-ES', { month: 'short', day: 'numeric' });
+        cell.title = `${datePretty}: ${level > 0 ? 'Cumplido' : 'No realizado'}`;
+
+        grid.appendChild(cell);
+    }
 }
 
 
@@ -1641,8 +2010,15 @@ async function calculateCrossAnalytics() {
 
     const percent = Math.round((countBoth / countA) * 100);
     resultEl.innerHTML = `
-        <p style="font-size: 2.5rem; font-weight: bold; color: var(--primary); margin: 0;">${percent}%</p>
-        <p class="text-sm text-muted">(${countBoth} de ${countA} veces)</p>
+        <div style="margin-top:0.5rem;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+                <span style="font-size: 2rem; font-weight: bold; color: var(--primary);">${percent}%</span>
+                <span class="text-sm text-muted">(${countBoth}/${countA})</span>
+            </div>
+            <div class="progress-bar-bg" style="height: 8px; margin-top: 4px;">
+                <div class="progress-bar-fill" style="width: ${percent}%"></div>
+            </div>
+        </div>
     `;
 }
 
